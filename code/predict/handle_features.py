@@ -7,100 +7,9 @@ Created on 2017年12月20日
 
 import numpy as np
 import datetime
-import time
-import json
 import func
-import urllib3
 import params
 
-'''
-时间转换成时间戳
-'''
-def datetime2timestamp(dt):
-    s = time.mktime(time.strptime(dt,'%Y-%m-%d %H:%M:%S'))
-    return int(s)
-
-'''
-得到昨天最后30min的数据
-'''
-def get_data(dt, system, hourfrom='23:30:00', hourto='23:59:00'):
-    datefrom = datetime2timestamp(dt + ' ' + hourfrom)
-    datetill = datetime2timestamp(dt + ' ' + hourto)
-    http = urllib3.PoolManager()
-    data = {
-        "aggs": {
-        "date_histogram": {
-        "field": "@timestamp",
-        "interval": "1m",
-        "time_zone": "Asia/Shanghai",
-        "min_doc_count": 1
-        }
-    },
-    "filter": {
-        "system": system,
-        "software": "Apache"
-        },
-    "range": {
-        "time_from": datefrom,
-        "time_till": datetill
-        }
-    }
-    encode_data = json.dumps(data).encode('utf-8')
-
-    r = http.request(
-        'POST',
-        'http://21.122.16.209/log/agg/logstash*',
-        body=encode_data,
-        headers={'Content-Type':'application/json', 'apikey':'b2e31497ee69493c88f21a7173ac9724'}
-    )
-
-    res = []
-
-    res_tmp = []
-    res_tmp = json.loads(r.data.decode('utf-8'))['data']
-    for each in res_tmp:
-        tmp = {}
-        hour = int(each['key_as_string'][11:13])
-        minute =int(each['key_as_string'][14:16])
-        index = 60*hour + minute
-        tmp['date'] = each['key_as_string'][0:10]
-        tmp['time'] = each['key_as_string'][11:18]
-        tmp['isWeekday'] = 1 if datetime.datetime.strptime(dt, '%Y-%m-%d').weekday() < 5 else 0
-        tmp['count'] = each['doc_count']
-        #print (tmp)
-        res.append(tmp)
-    return res
-
-'''
-计算相应index的访问量的平均值：取前5天或者前2天的历史数据计算
-'''
-def get_sum_data(date):
-    
-    # 取date之前的工作日或周末日的日期存到weekdaygroup or weekendgroup中
-    weekdaygroup = []
-    weekendgroup = []
-    for eachnum in range(1, 8):
-        datetmp = (datetime.datetime.strptime(date, "%Y-%m-%d") + datetime.timedelta(days=0-eachnum))
-        if datetmp.weekday() < 5:
-            weekdaygroup.append(datetmp.strftime('%Y-%m-%d'))
-        else:
-            weekendgroup.append(datetmp.strftime('%Y-%m-%d'))
-    
-    # 发请求去取数据
-    sum_data = np.zeros([1440, 1])
-    if func.isWeekday(date) == 1:
-        # get 5 weekday
-        for m in range(len(weekdaygroup)):
-            data_weekday = get_data(weekdaygroup[m], 'BOCOP-*', hourfrom='00:00:00', hourto='23:59:00')
-            for n in range(len(data_weekday)):
-                sum_data[n] += float(data_weekday[n]['count'])
-    else:
-        # get 2 weekend
-        for m in range(len(weekendgroup)):
-            data_weekend = get_data(weekendgroup[m], 'BOCOP-*', hourfrom='00:00:00', hourto='23:59:00')
-            for n in range(len(data_weekend)):
-                sum_data[n] += float(data_weekend[n]['count'])
-    return sum_data
 
 '''
 构造一个下一分钟Xt的特征向量：71维
@@ -190,45 +99,142 @@ def create_next_min_feature_vector(index, prev_seq, predict_count, count_mean, c
     return tran
 
 '''
-构造一个下一分钟Xt的特征向量：6维
-'''
-def create_next_min_6feature_vector(index, prev_seq, predict_count, count_mean, count_std, sum_data):
+构造一个下一分钟Xt的特征向量：4维
 
-    datenow = datetime.datetime.now()
-    date = datenow.strftime('%Y-%m-%d')
-    s = str.split(date, '-')
-    # 一天的开始, eg: 2018-01-01 00:00:0
+def create_next_min_7feature_vector(index, prev_seq, predict_count, count_mean, count_std, sum_data, last_weekday_data):
+
+    today = datetime.datetime.now().strftime('%Y-%m-%d')
+    s = str.split(today, '-')
+    # 创造一天的开始时间, eg: 2018-01-01 00:00:0
     d0 = datetime.datetime(int(s[0]), int(s[1]), int(s[2]), 0, 0, 0)
-    d1 = d0 + datetime.timedelta(minutes=index)  # 增加index分钟
-
-    ss = str.split((str)(d1), ' ')  # 2018-01-01 00:00:0
+    # 增加index分钟
+    d1 = d0 + datetime.timedelta(minutes=index)
+    ss = str.split((str)(d1), ' ')  # 2018-01-01(ss[0]) 00:00:0(ss[1])
 
     # 开始构造
     tran = []
     # index: 当前分钟索引
     tran.append(index)
+
     # count: 交易量
     tran.append(predict_count * count_std + count_mean)
 
     # isWeekday: 工作日
-    if func.isWeekday(date) == 1:
+    if func.isWeekday(today) == 1:
+        tran.append(1)
+    else:
+        tran.append(0)
+
+    # 每周的第几天
+    func.appendWeekDayIndex(tran, today)
+
+    return tran
+'''
+
+'''
+构造一个下一分钟Xt的特征向量：7维
+'''
+def create_next_min_7feature_vector(index, prev_seq, predict_count, count_mean, count_std, sum_data, last_weekday_data):
+
+    today = datetime.datetime.now().strftime('%Y-%m-%d')
+    s = str.split(today, '-')
+    # 创造一天的开始时间, eg: 2018-01-01 00:00:0
+    d0 = datetime.datetime(int(s[0]), int(s[1]), int(s[2]), 0, 0, 0)
+    # 增加index分钟
+    d1 = d0 + datetime.timedelta(minutes=index)
+    ss = str.split((str)(d1), ' ')  # 2018-01-01(ss[0]) 00:00:0(ss[1])
+
+    # 开始构造
+    tran = []
+    # index: 当前分钟索引
+    tran.append(index)
+
+    # count: 交易量
+    tran.append(predict_count * count_std + count_mean)
+
+    # isWeekday: 工作日
+    if func.isWeekday(today) == 1:
         tran.append(1)
     else:
         tran.append(0)
 
     # 每天的第几个小时
     func.appendHourDayIndex(tran, ss[1])
-    # 每周的第几天
-    func.appendWeekDayIndex(tran, date)
 
+    # 每周的第几天
+    func.appendWeekDayIndex(tran, today)
+
+    # 平均值
     mean_index = 0.0
-    if func.isWeekday(date) == 1:  # 前5个工作日的相应index分钟的平均访问量
+    if func.isWeekday(today) == 1:  # 前5个工作日的相应index分钟的平均访问量
         mean_index = sum_data[index] / 5.0
     else:  # 前2个周末日的相应index分钟的平均访问量
         mean_index = sum_data[index] / 2.0
-    tran.append(mean_index[0])
+    tran.append(float(mean_index[0]))
+
+    # 上一周该天相应index分钟的访问量
+    if last_weekday_data is not None:
+        tran.append(float(last_weekday_data[index]))
+    else:
+        print('haha')
+        tran.append(float(data[index]['count']))
 
     return tran
+
+'''
+构造一个下一分钟Xt的特征向量：8维
+'''
+def create_next_min_8feature_vector(index, prev_seq, predict_count, count_mean, count_std, sum_data, last_weekday_data):
+
+    today = datetime.datetime.now().strftime('%Y-%m-%d')
+    s = str.split(today, '-')
+    # 创造一天的开始时间, eg: 2018-01-01 00:00:0
+    d0 = datetime.datetime(int(s[0]), int(s[1]), int(s[2]), 0, 0, 0)
+    # 增加index分钟
+    d1 = d0 + datetime.timedelta(minutes=index)
+    ss = str.split((str)(d1), ' ')  # 2018-01-01(ss[0]) 00:00:0(ss[1])
+
+    # 开始构造
+    tran = []
+    # index: 当前分钟索引
+    tran.append(index)
+
+    # count: 交易量
+    tran.append(predict_count * count_std + count_mean)
+
+    # isWeekday: 工作日
+    if func.isWeekday(today) == 1:
+        tran.append(1)
+    else:
+        tran.append(0)
+
+    # 每天的第几个小时
+    func.appendHourDayIndex(tran, ss[1])
+
+    # 每周的第几天
+    func.appendWeekDayIndex(tran, today)
+
+    # 平均值
+    mean_index = 0.0
+    if func.isWeekday(today) == 1:  # 前5个工作日的相应index分钟的平均访问量
+        mean_index = sum_data[index] / 5.0
+    else:  # 前2个周末日的相应index分钟的平均访问量
+        mean_index = sum_data[index] / 2.0
+    tran.append(float(mean_index[0]))
+
+    # 上一周该天相应index分钟的访问量
+    if last_weekday_data is not None:
+        tran.append(float(last_weekday_data[index]))
+    else:
+        print('haha')
+        tran.append(float(data[index]['count']))
+
+    # 是否是节假日
+    holiday = func.isHoliday(today)
+    tran.append(holiday)
+
+    return tran
+
 
 '''
 构建特征向量：71维
@@ -334,9 +340,62 @@ def create_features_vector(data, date, sum_data):
     return res
 
 '''
-构建特征向量：6维
+构建特征向量：8维
 '''
-def create_6features_vector(data, date, sum_data):
+def create_features_vector(data, date, sum_data, last_weekday_data):
+    res = []
+
+    for i in range(len(data)):
+        tran = []
+        # index: 当前分钟索引
+        index = min2index(data[i]['time'])
+        tran.append(index)
+        
+        # count: 交易量
+        tran.append(data[i]['count'])
+
+        # isWeekday: 工作日
+        if func.isWeekday(data[i]['date']) == 1:
+            tran.append(1)
+        else:
+            tran.append(0)
+
+        # 每天的第几个小时
+        func.appendHourDayIndex(tran, data[i]['time'])
+        # 每天的第几个两小时
+        # func.handle12_1(tran, ds[1])
+        
+        # 每周的第几天
+        func.appendWeekDayIndex(tran, data[i]['date'])
+
+        # 计算相应index的访问量的平均值
+        mean_index = 0.0
+        if func.isWeekday(date) == 1:  # 前5个工作日的相应index分钟的平均访问量
+            mean_index = sum_data[index] / 5.0
+        else:  # 前2个周末日的相应index分钟的平均访问量
+            mean_index = sum_data[index] / 2.0
+        tran.append(mean_index[0])
+
+        # 上一周该天相应index分钟的访问量
+        if last_weekday_data is not None:
+            tran.append(float(last_weekday_data[index]))
+        else:
+            tran.append(float(data[i]['count']))
+            print('haha')
+
+        # 是否是节假日
+        holiday = func.isHoliday(data[i]['date'])
+        tran.append(holiday)
+
+        res.append(tran)
+    return res
+
+
+
+'''
+构建特征向量：7维
+
+def create_features_vector(data, date, sum_data, last_weekday_data):
     res = []
 
     for i in range(len(data)):
@@ -368,8 +427,45 @@ def create_6features_vector(data, date, sum_data):
             mean_index = sum_data[index] / 2.0
         tran.append(mean_index[0])
 
+        # 上一周该天相应index分钟的访问量
+        if last_weekday_data is not None:
+            tran.append(float(last_weekday_data[index]))
+        else:
+            tran.append(float(data[i]['count']))
+            print('haha')
+
         res.append(tran)
     return res
+'''
+
+'''
+构建特征向量：4维
+
+def create_features_vector(data, date, sum_data, last_weekday_data):
+    res = []
+
+    for i in range(len(data)):
+        tran = []
+        # index: 当前分钟索引
+        index = min2index(data[i]['time'])
+        tran.append(index)
+        
+        # count: 交易量
+        tran.append(data[i]['count'])
+
+        # isWeekday: 工作日
+        if func.isWeekday(data[i]['date']) == 1:
+            tran.append(1)
+        else:
+            tran.append(0)
+        
+        # 每周的第几天
+        func.appendWeekDayIndex(tran, data[i]['date'])
+
+        res.append(tran)
+    return res
+'''
+
 
 '''
 标准化给定的特征向量
@@ -381,20 +477,16 @@ def normalized_feature_vector(feature_vector):
 
     train_data_mean = np.load(normalized_features_mean_data_dir)
     train_data_std = np.load(normalized_features_std_data_dir)
+    # print('fv:')
+    # print(feature_vector)
+    # print('tdm:')
+    # print(train_data_mean)
+    # print('tds:')
+    # print(train_data_std)
+    # print('res:')
+    # print((feature_vector - train_data_mean) / train_data_std)
+    # exit()
     return (feature_vector - train_data_mean) / train_data_std
-
-
-'''
-标准化：待测试去掉是否可以
-'''
-def normalized_next_min_feature_vector(tran):
-    # 获取训练数据标准化的mean和std
-    normalized_features_mean_data_dir = params.project_dir + '/' + params.dict_dir + '/normalized_features_mean.npy'
-    normalized_features_std_data_dir = params.project_dir +  '/' + params.dict_dir + '/normalized_features_std.npy'
-
-    train_data_mean = np.load(normalized_features_mean_data_dir)
-    train_data_std = np.load(normalized_features_std_data_dir)
-    return (tran - train_data_mean) / train_data_std
 
 '''
 example:
