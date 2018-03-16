@@ -6,6 +6,8 @@ Date from 2017-08-27 to 2018-03-14, every minute's transaction count.
 
 
 
+The uploaded data is part of training data. If you are interested this project, please contact me to get more data. :)
+
 <br>
 
 # Predict
